@@ -11,7 +11,7 @@ int main(void)
   int n1 = 0, n2 = 0;
 
   /* Extract the two arguments */
-  if ((buf = getenv("QUERY_STRIHNG")) != NULL)
+  if ((buf = getenv("QUERY_STRING")) != NULL)
   {
     p = strchr(buf, '&');
     *p = '\0';
@@ -34,8 +34,6 @@ int main(void)
   printf("Content-type: text/html\r\n\r\n");
   printf("%s", content);
   fflush(stdout);
-
-  exit(0);
 
   exit(0);
 }
