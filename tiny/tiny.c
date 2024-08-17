@@ -173,10 +173,13 @@ void serve_static(int fd, char *filename, int filesize)
 
   /* Send response body to client */
   srcfd = Open(filename, O_RDONLY, 0);
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+  srcp = malloc(filesize);
+  read(srcfd, srcp, filesize);
+  // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
   Close(srcfd);
   Rio_writen(fd, srcp, filesize);
-  Munmap(srcp, filesize);
+  // Munmap(srcp, filesize);
+  free(srcp);
 }
 /*
  * get_filetype - Derive file type from filename
