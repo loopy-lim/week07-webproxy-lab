@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Add</title>
+</head>
+
+<body>
+  <form method="get" style="display: flex; flex-direction: column; gap: 1rem; width: 400px;" onsubmit="sumbit">
+    <input type="number" name="" id='a' required>
+    <input type="number" name="" id='b' required>
+    <button type="submit">확인</button>
+  </form>
+  <script>
+    const form = document.querySelector('form');
+    form.addEventListener('submit', submit);
+
+    function submit(e) {
+      e.preventDefault();
+      const a = document.querySelector('#a');
+      const b = document.querySelector('#b');
+      const url = `/cgi-bin/adder?${a.value}&${b.value}`;
+      window.location.href = url;
+    }
+  </script>
+</body>
+
+</html>

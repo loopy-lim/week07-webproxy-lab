@@ -22,15 +22,15 @@ int main(void)
   }
 
   /* Make the response body */
-  sprintf(content, "QUERY_STRING=%s", buf);
-  sprintf(content, "Welcome to add.com: ");
+  sprintf(content, "QUERY_STRING=%s\r\n", buf);
+  sprintf(content, "%sWelcome to add.com: \r\n", content);
   sprintf(content, "%sThe Internet addition portal.\r\n<p>", content);
   sprintf(content, "%sThe answer is: %d + %d = %d</p>\r\n", content, n1, n2, n1 + n2);
   sprintf(content, "%sThanks for visiting!\r\n", content);
 
   /* Generate the HTTP response */
   printf("Connection: close\r\n");
-  printf("Content-length: %d\r\n", (int)strlen(connect));
+  printf("Content-length: %d\r\n", (int)strlen(content));
   printf("Content-type: text/html\r\n\r\n");
   printf("%s", content);
   fflush(stdout);
