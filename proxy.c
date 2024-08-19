@@ -15,6 +15,7 @@ void get_filetype(char *filename, char *filetype);
 void init();
 int pathToFileName(char *uri, char *filename);
 void serveStatic(int fd, char *file_name);
+void sigchild_handler(int sig);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -42,14 +43,18 @@ int main(int argc, char **argv)
     connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
     Getnameinfo((SA *)&clientaddr, clientlen, client_hostname, MAXLINE, client_port, MAXLINE, 0);
     printf("Connected to (%s, %s)\n", client_hostname, client_port);
-    proxyfd = sendProxy(client_hostname, client_port, connfd);
-
-    if (proxyfd > 0)
+    if (Fork() == 0) /* Child Process */
     {
-      deliveryProxy(connfd, proxyfd);
-      Close(proxyfd);
+      proxyfd = sendProxy(client_hostname, client_port, connfd);
+
+      if (proxyfd > 0)
+      {
+        deliveryProxy(connfd, proxyfd);
+        Close(proxyfd);
+      }
+      Close(connfd);
     }
-    Close(connfd);
+    Close(connfd); /* Parent Process Clean up */
   }
   exit(0);
 }
@@ -57,6 +62,7 @@ int main(int argc, char **argv)
 void init()
 {
   Signal(SIGPIPE, SIG_IGN);
+  Signal(SIGCHLD, sigchild_handler);
 }
 
 int deliveryProxy(int connfd, int proxyfd)
@@ -251,4 +257,11 @@ int pathToFileName(char *uri, char *path)
   strcpy(path, "./.proxy");
   strcat(path, uri);
   return 1;
+}
+
+void sigchild_handler(int sig)
+{
+  while (waitpid(-1, 0, WNOHANG) > 0)
+    ;
+  return;
 }
