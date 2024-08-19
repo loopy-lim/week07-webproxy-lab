@@ -8,6 +8,13 @@
 int sendProxy(char *client_hostname, char *client_port, int connfd);
 void parseUrl(char *uri, char *host, char *port, char *path);
 int deliveryProxy(int connfd, int proxyfd);
+void useCache(int connfd, char *path);
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void serveStatic(int fd, char *file_name);
+void get_filetype(char *filename, char *filetype);
+void init();
+int pathToFileName(char *uri, char *filename);
+void serveStatic(int fd, char *file_name);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -20,6 +27,7 @@ int main(int argc, char **argv)
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
   char client_hostname[MAXLINE], client_port[MAXLINE];
+  init();
 
   if (argc != 2)
   {
@@ -36,30 +44,31 @@ int main(int argc, char **argv)
     printf("Connected to (%s, %s)\n", client_hostname, client_port);
     proxyfd = sendProxy(client_hostname, client_port, connfd);
 
-    if (proxyfd != -1)
+    if (proxyfd > 0)
     {
       deliveryProxy(connfd, proxyfd);
-      Close(connfd);
       Close(proxyfd);
     }
-    else
-    {
-      printf("Proxy failed\n");
-      Close(connfd);
-    }
+    Close(connfd);
   }
   exit(0);
 }
 
+void init()
+{
+  Signal(SIGPIPE, SIG_IGN);
+}
+
 int deliveryProxy(int connfd, int proxyfd)
 {
+  printf("\n============ Delivery Proxy ============\n");
   char buf[MAXLINE];
   rio_t rio;
   Rio_readinitb(&rio, proxyfd);
   size_t n;
   while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0)
   {
-    // printf("server received %d bytes \n", (int)n);
+    printf("server received %d bytes \n", (int)n);
     Rio_writen(connfd, buf, n);
   }
 }
@@ -73,6 +82,7 @@ int sendProxy(char *client_hostname, char *client_port, int connfd)
 
   Rio_readinitb(&rio, connfd);
   Rio_readlineb(&rio, buf, MAXLINE);
+  printf("\n============ Check Proxy ============\n");
   printf("Request headers: \n");
   printf("%s \n", buf);
 
@@ -83,8 +93,15 @@ int sendProxy(char *client_hostname, char *client_port, int connfd)
     printf("Proxy does not implement this method\n");
     return -1;
   }
-
   parseUrl(uri, host, port, path);
+  clientfd = open_clientfd(host, port);
+  if (clientfd < 0)
+  {
+    printf("Proxy could not connect to server\nTry to use cache\n");
+    useCache(connfd, path);
+    return -1;
+  }
+
   sprintf(buf, "GET %s HTTP/1.0\r\n", path);
   sprintf(buf, "%sHost: %s\r\n", buf, host);
   sprintf(buf, "%s%s", buf, user_agent_hdr);
@@ -94,9 +111,7 @@ int sendProxy(char *client_hostname, char *client_port, int connfd)
 
   // printf("request buf: \n %s \n", buf);
 
-  clientfd = Open_clientfd(host, port);
   Rio_writen(clientfd, buf, strlen(buf));
-
   return clientfd;
 }
 
@@ -105,7 +120,8 @@ void parseUrl(char *uri, char *host, char *port, char *path)
   char *ptr = strstr(uri, "//");
   if (ptr == NULL)
   {
-    ptr = uri;
+    if (uri != NULL)
+      ptr = uri;
   }
   else
   {
@@ -116,24 +132,123 @@ void parseUrl(char *uri, char *host, char *port, char *path)
   if (ptr2 == NULL)
   {
     ptr2 = strstr(ptr, "/");
-    strcpy(port, "80");
+    if (port != NULL)
+      strcpy(port, "80");
   }
   else
   {
     *ptr2 = '\0';
-    strcpy(port, ptr2 + 1);
-    ptr2 = strstr(port, "/");
+    if (port != NULL)
+      strcpy(port, ptr2 + 1);
+    if (port != NULL)
+      ptr2 = strstr(port, "/");
   }
 
   if (ptr2 == NULL)
   {
-    strcpy(path, "/");
+    if (path != NULL)
+      strcpy(path, "/");
   }
   else
   {
-    strcpy(path, ptr2);
+    if (path != NULL)
+      strcpy(path, ptr2);
     *ptr2 = '\0';
   }
+  if (host != NULL)
+    strcpy(host, ptr);
+}
 
-  strcpy(host, ptr);
+void serveStatic(int fd, char *file_name)
+{
+  int srcfd, filesize;
+  struct stat sbuf;
+  char *srcp, filetype[MAXLINE], buf[MAXBUF], paths[MAXLINE];
+
+  printf("\n============ Serve Static File ============\n");
+  if (stat(file_name, &sbuf) < 0)
+  {
+    printf("ServeStatic error: file not exist\n");
+    printf("file name: %s\n", file_name);
+    clienterror(fd, file_name, "404", "Not found", "Proxy couldn't find this file");
+    return;
+  }
+
+  filesize = sbuf.st_size;
+
+  /* Send response headers to client */
+  get_filetype(file_name, filetype);
+  sprintf(buf, "HTTP/1.0 200 OK\r\n");
+  sprintf(buf, "%sServer: Proxy Server\r\n", buf);
+  sprintf(buf, "%sConnection: close\r\n", buf);
+  sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
+  sprintf(buf, "%sProxy-Connection: close\r\n", buf);
+  sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
+  Rio_writen(fd, buf, strlen(buf));
+  printf("Response headers:\n");
+  printf("%s", buf);
+
+  /* Send response body to client */
+  srcfd = Open(file_name, O_RDONLY, 0);
+  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+  Close(srcfd);
+  Rio_writen(fd, srcp, filesize);
+  Munmap(srcp, filesize);
+}
+
+void useCache(int connfd, char *path)
+{
+  char filename[MAXLINE];
+  printf("\n============ Use Cache ============\n");
+  printf("fd: %d \n", connfd);
+  pathToFileName(path, filename);
+  printf("filename: %s paths: %s\n", filename, path);
+
+  serveStatic(connfd, filename);
+}
+
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg)
+{
+  char buf[MAXLINE], body[MAXBUF];
+
+  /* Build the HTTP response body */
+  sprintf(body, "<html><title>Error Error</title>");
+  sprintf(body, "%s<body bgcolor='ffffff'>\r\n ",
+          body);
+  sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
+  sprintf(body, "%s<hr><em>The Proxy server</em>\r\n", body);
+
+  /* Print the HTTP response */
+  sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
+  sprintf(buf, "Content-type: text/html\r\n");
+  sprintf(buf, "Content-length: %d\r\n", (int)strlen(body));
+  sprintf(buf, "%s\r\n", buf);
+
+  Rio_writen(fd, buf, strlen(buf));
+  Rio_writen(fd, body, strlen(body));
+}
+
+void get_filetype(char *filename, char *filetype)
+{
+  if (strstr(filename, ".html"))
+    strcpy(filetype, "text/html");
+  else if (strstr(filename, ".gif"))
+    strcpy(filetype, "image/gif");
+  else if (strstr(filename, ".png"))
+    strcpy(filetype, "image/png");
+  else if (strstr(filename, ".jpg"))
+    strcpy(filetype, "image/jpeg");
+  else if (strstr(filename, ".mpg"))
+    strcpy(filetype, "video/mpeg");
+  else if (strstr(filename, ".mp4"))
+    strcpy(filetype, "video/mp4");
+  else
+    strcpy(filetype, "text/plain");
+}
+
+int pathToFileName(char *uri, char *path)
+{
+  strcpy(path, "./.proxy");
+  strcat(path, uri);
+  return 1;
 }
