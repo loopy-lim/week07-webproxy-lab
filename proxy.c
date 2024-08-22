@@ -7,20 +7,16 @@
 
 int sendProxy(char *client_hostname, char *client_port, int connfd);
 void parseUrl(char *uri, char *host, char *port, char *path);
-int deliveryProxy(int connfd, int proxyfd);
-void useCache(int connfd, char *path);
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
-void serveStatic(int fd, char *file_name);
-void get_filetype(char *filename, char *filetype);
+int serveStatic(int fd, char *filename);
 void init();
 int pathToFileName(char *uri, char *filename);
-void serveStatic(int fd, char *file_name);
 void sigchild_handler(int sig);
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
     "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 "
     "Firefox/10.0.3\r\n";
+sem_t s;
 
 int main(int argc, char **argv)
 {
@@ -45,14 +41,8 @@ int main(int argc, char **argv)
     printf("Connected to (%s, %s)\n", client_hostname, client_port);
     if (Fork() == 0) /* Child Process */
     {
-      proxyfd = sendProxy(client_hostname, client_port, connfd);
-
-      if (proxyfd > 0)
-      {
-        deliveryProxy(connfd, proxyfd);
-        Close(proxyfd);
-      }
-      Close(connfd);
+      sendProxy(client_hostname, client_port, connfd);
+      // Close(connfd);
     }
     Close(connfd); /* Parent Process Clean up */
   }
@@ -65,32 +55,18 @@ void init()
   Signal(SIGCHLD, sigchild_handler);
 }
 
-int deliveryProxy(int connfd, int proxyfd)
-{
-  printf("\n============ Delivery Proxy ============\n");
-  char buf[MAXLINE];
-  rio_t rio;
-  Rio_readinitb(&rio, proxyfd);
-  size_t n;
-  while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0)
-  {
-    printf("server received %d bytes \n", (int)n);
-    Rio_writen(connfd, buf, n);
-  }
-}
-
 int sendProxy(char *client_hostname, char *client_port, int connfd)
 {
   int clientfd;
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-  char host[MAXLINE], port[MAXLINE], path[MAXLINE];
+  char host[MAXLINE], port[MAXLINE], path[MAXLINE], filename[MAXLINE];
   rio_t rio;
+  struct stat sbuf;
 
   Rio_readinitb(&rio, connfd);
   Rio_readlineb(&rio, buf, MAXLINE);
   printf("\n============ Check Proxy ============\n");
-  printf("Request headers: \n");
-  printf("%s \n", buf);
+  printf("Request headers: %s \n", buf);
 
   sscanf(buf, "%s %s %s", method, uri, version);
 
@@ -100,11 +76,20 @@ int sendProxy(char *client_hostname, char *client_port, int connfd)
     return -1;
   }
   parseUrl(uri, host, port, path);
+  pathToFileName(path, filename);
+
+  if (!strstr(uri, "cgi-bin"))
+  {
+    if (serveStatic(connfd, filename) > 0)
+    {
+      return -1;
+    }
+  }
+
   clientfd = open_clientfd(host, port);
   if (clientfd < 0)
   {
     printf("Proxy could not connect to server\nTry to use cache\n");
-    useCache(connfd, path);
     return -1;
   }
 
@@ -114,11 +99,42 @@ int sendProxy(char *client_hostname, char *client_port, int connfd)
   sprintf(buf, "%sConnection: close\r\n", buf);
   sprintf(buf, "%sProxy-Connection: close\r\n", buf);
   sprintf(buf, "%s\r\n", buf);
-
-  // printf("request buf: \n %s \n", buf);
-
   Rio_writen(clientfd, buf, strlen(buf));
-  return clientfd;
+
+  printf("\n============ Delivery Proxy ============\n");
+  char client_buf[MAXLINE];
+  rio_t client_rio;
+  Rio_readinitb(&client_rio, clientfd);
+  size_t n;
+  int file_size = 0;
+  int is_body_start = 0;
+
+  sem_wait(&s);
+  int cache_file_fd = open(filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+
+  while ((n = Rio_readlineb(&client_rio, client_buf, MAXLINE)) != 0)
+  {
+    Rio_writen(connfd, client_buf, n);
+    printf("%s", client_buf);
+    if (is_body_start)
+    {
+      Rio_writen(cache_file_fd, client_buf, n);
+      file_size += n;
+    }
+    if (client_buf[0] == '\r')
+      is_body_start = 1;
+  }
+
+  Close(cache_file_fd);
+
+  if (file_size > MAX_OBJECT_SIZE)
+  {
+    remove(filename);
+  }
+  sem_post(&s);
+  Close(clientfd);
+
+  return 0;
 }
 
 void parseUrl(char *uri, char *host, char *port, char *path)
@@ -165,25 +181,29 @@ void parseUrl(char *uri, char *host, char *port, char *path)
     strcpy(host, ptr);
 }
 
-void serveStatic(int fd, char *file_name)
+int serveStatic(int fd, char *filename)
 {
   int srcfd, filesize;
   struct stat sbuf;
   char *srcp, filetype[MAXLINE], buf[MAXBUF], paths[MAXLINE];
 
   printf("\n============ Serve Static File ============\n");
-  if (stat(file_name, &sbuf) < 0)
+  printf("filename: %s\n", filename);
+
+  if (stat(filename, &sbuf) < 0)
   {
     printf("ServeStatic error: file not exist\n");
-    printf("file name: %s\n", file_name);
-    clienterror(fd, file_name, "404", "Not found", "Proxy couldn't find this file");
-    return;
+    return -1;
   }
 
   filesize = sbuf.st_size;
+  if (filesize <= 0)
+  {
+    return -1;
+  }
 
   /* Send response headers to client */
-  get_filetype(file_name, filetype);
+  get_filetype(filename, filetype);
   sprintf(buf, "HTTP/1.0 200 OK\r\n");
   sprintf(buf, "%sServer: Proxy Server\r\n", buf);
   sprintf(buf, "%sConnection: close\r\n", buf);
@@ -195,43 +215,12 @@ void serveStatic(int fd, char *file_name)
   printf("%s", buf);
 
   /* Send response body to client */
-  srcfd = Open(file_name, O_RDONLY, 0);
+  srcfd = Open(filename, O_RDONLY, 0);
   srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
   Close(srcfd);
   Rio_writen(fd, srcp, filesize);
   Munmap(srcp, filesize);
-}
-
-void useCache(int connfd, char *path)
-{
-  char filename[MAXLINE];
-  printf("\n============ Use Cache ============\n");
-  printf("fd: %d \n", connfd);
-  pathToFileName(path, filename);
-  printf("filename: %s paths: %s\n", filename, path);
-
-  serveStatic(connfd, filename);
-}
-
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg)
-{
-  char buf[MAXLINE], body[MAXBUF];
-
-  /* Build the HTTP response body */
-  sprintf(body, "<html><title>Error Error</title>");
-  sprintf(body, "%s<body bgcolor='ffffff'>\r\n ",
-          body);
-  sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
-  sprintf(body, "%s<hr><em>The Proxy server</em>\r\n", body);
-
-  /* Print the HTTP response */
-  sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
-  sprintf(buf, "Content-type: text/html\r\n");
-  sprintf(buf, "Content-length: %d\r\n", (int)strlen(body));
-  sprintf(buf, "%s\r\n", buf);
-
-  Rio_writen(fd, buf, strlen(buf));
-  Rio_writen(fd, body, strlen(body));
+  return 1;
 }
 
 void get_filetype(char *filename, char *filetype)
@@ -252,10 +241,12 @@ void get_filetype(char *filename, char *filetype)
     strcpy(filetype, "text/plain");
 }
 
-int pathToFileName(char *uri, char *path)
+int pathToFileName(char *path, char *filename)
 {
-  strcpy(path, "./.proxy");
-  strcat(path, uri);
+  strcpy(filename, "./.tmp_proxy");
+  strcat(filename, path);
+  if (path[strlen(path) - 1] == '/')
+    strcat(filename, "home.html");
   return 1;
 }
 
